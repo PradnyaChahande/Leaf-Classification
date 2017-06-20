@@ -1,0 +1,301 @@
+---
+title: "Leaf Classification"
+author: "TTU-PradnyaC"
+date: "November 12, 2016"
+output: html_document
+---
+
+Load Libraries
+```{r}
+require(caret)
+require(dplyr)
+require('corrplot')
+require(caret)
+require(ipred)
+require(pROC)
+library(e1071)
+library(h2o)
+
+```
+
+
+Input Data
+```{r}
+train <- read.csv("D:/Pradnya/TTU/Fall 2016/Multivariate Analysis/Mid Term/Data/train.csv/train.csv")
+test <- read.csv("D:/Pradnya/TTU/Fall 2016/Multivariate Analysis/Mid Term/Data/test.csv/test.csv")
+
+str(train)
+str(test)
+
+```
+Check missing values
+```{r}
+
+na <- sapply(train,function (x) sum(is.na(x)))
+sum(na)
+total <-bind_rows(train,test)
+
+```
+Seperate margin, shape and texture features
+```{r}
+Margin<-train %>% select(contains("margin"))
+Shape<- total %>% select(contains('shape'))
+Texture<- total %>% select(contains('texture'))
+```
+Find correlations
+```{r}
+corrplot(cor(Margin),method="circle", type="lower",  sig.level = 0.01, insig = "blank",title ="Correlation for Margin Features")
+
+corrplot(cor(Shape),method="circle", type="lower",  sig.level = 0.01, insig = "blank",title ="Correlation for Shape Features")
+#Shape variables are highly correlated and has a pattern
+
+corrplot(cor(Texture),method="circle", type="lower",  sig.level = 0.01, insig = "blank",title ="Correlation for Texture Features")
+
+```
+Split training data
+```{r}
+set.seed(1234)
+splitIndex <- createDataPartition(train[,'species'], p = .75, list = FALSE, times = 1)
+split_train <- train[ splitIndex,]
+split_test  <- train[-splitIndex,]
+
+```
+
+Running fit without any feature reduction
+1.Stabilized Linear Discriminant Analysis
+```{r}
+
+#Set Control
+control <- trainControl(method="cv", number=10, repeats=3, classProbs= TRUE, summaryFunction = multiClassSummary )
+
+#Run Fit
+fit <- train(species~., data=split_train[-1], method="slda", metric="logLoss", 
+       trControl=control, preProcess = c("center", "scale") )
+
+#Print Fit details
+print(fit)
+
+#Predict on part of train data
+pred <- predict(fit, split_test[-1], preProcess = c("center", "scale"),type = "prob" )
+
+#check the output format
+str(pred)
+
+#get the species with the max probability for each tuple
+pred_specis<-gsub('(.*, )|(\\..*)','',names(pred[apply(pred, 1, which.is.max)]))
+
+#confusionMatrix(as.factor(pred_specis), split_test$species)
+
+#Check accuracy
+print(postResample(pred=as.factor(pred_specis), obs=split_test[,'species']))
+
+#Predict for test data
+slda_Prediction <- predict(fit, test[-1], preProcess = c("center", "scale"),type = "prob" )
+
+solution <- data.frame(id = test$id, slda_Prediction)
+write.csv(solution, file = 'slda_Solution.csv', row.names = F)
+
+```
+Running PCA for Shape features
+```{r}
+
+pr_shape <- prcomp(Shape, center = TRUE, scale. = TRUE) #PC3
+summary(pr_shape)
+
+pr_margin <- prcomp(cov(Margin), center = TRUE, scale. = TRUE)  #PC25
+pr_margin <- prcomp(Margin, center = TRUE, scale. = TRUE)  #PC25
+summary(pr_margin)
+str(pr_margin$x)
+
+pr_texture <- prcomp(Texture, center = TRUE, scale. = TRUE) #PC30
+summary(pr_texture)
+
+pr_train <- data.frame(train$species,pr_margin$x[,1:5],pr_shape$x[,1:5],pr_texture$x[,1:5])
+
+#pr_train <- pr_total[1:990,]
+
+str(pr_train)
+
+set.seed(1234)
+splitIndex <- createDataPartition(pr_train[,'total.species'], p = .75, list = FALSE, times = 1)
+pca_split_train <- pr_train[ splitIndex,]
+pca_split_test  <- pr_train[-splitIndex,]
+
+pca_fit <- train(total.species~., data=pca_split_train, method="slda", metric="logLoss", 
+       trControl=control, preProcess = c("center", "scale") )
+
+#Print Fit details
+print(pca_fit)
+
+#Predict on part of train data
+pred <- predict(pca_fit, pca_split_test, preProcess = c("center", "scale"),type = "prob" )
+
+#check the output format
+str(pred)
+
+
+#get the species with the max probability for each tuple
+pred_specis<-gsub('(.*, )|(\\..*)','',names(pred[apply(pred, 1, which.is.max)]))
+
+#confusionMatrix(as.factor(pred_specis), split_test$species)
+
+#Check accuracy
+print(postResample(pred=as.factor(pred_specis), obs=pca_split_test[,'total.species']))
+
+#Prepare test data using PCA
+test_shape <- predict(pr_shape, newdata = test %>% select(contains("shape")))[,1:5]
+test_margin <- predict(pr_margin, newdata = test %>% select(contains("margin")))[,1:25]
+test_texture <- predict(pr_texture, newdata = test %>% select(contains("texture")))[,1:30]
+
+pca_test <- data.frame(test_margin,test_shape,test_texture)
+
+str(pca_test)
+
+#Predict for test data
+slda_Prediction <- predict(pca_fit, pca_test, preProcess = c("center", "scale"),type = "prob" )
+
+solution <- data.frame(id = test$id, slda_Prediction)
+write.csv(solution, file = 'pc_slda_Solution.csv', row.names = F)
+
+```
+
+SVM
+```{r}
+firstsvm= tune(svm,total.species~.,data=pca_split_train, kernel = "sigmoid", ranges = list(cost = c(0.001, 0.01, 0.1, 1, 5, 10, 100,200), gamma=c(2^(-1:1))), classProbs= TRUE, summaryFunction = multiClassSummary)
+
+#classProbs= TRUE, summaryFunction = multiClassSummary
+
+summary(firstsvm)
+print(firstsvm)
+bestsvm=firstsvm$best.model
+summary(bestsvm)
+
+mypredict=predict(bestsvm, pca_test, type ="prob" )
+
+
+extractProb(mypredict, testX=pca_test)
+```
+Caret SVM
+```{r}
+#Set Control
+control <- trainControl(method="cv", number=10, repeats=3, classProbs= TRUE, summaryFunction = multiClassSummary )
+
+#Run Fit
+svm_fit <- train(total.species~., data=pca_split_train, method="svmLinear", metric="logLoss", trControl=control, preProcess = c("BoxCox","center", "scale") )
+
+#Print Fit details
+print(svm_fit)
+
+#Predict on part of train data
+pred <- predict(svm_fit, pca_split_test, preProcess = c("center", "scale"),type = "prob" )
+
+#check the output format
+str(pred)
+```
+
+h2o deep learning
+```{r}
+h2o.init()
+
+train <- read.csv("D:/Pradnya/TTU/Fall 2016/Multivariate Analysis/Mid Term/Data/train.csv/train.csv")
+test <- read.csv("D:/Pradnya/TTU/Fall 2016/Multivariate Analysis/Mid Term/Data/test.csv/test.csv")
+
+train2 = train[,c(-1)]
+test2 = test[,-1]
+
+write.csv(train2, file="D:/Pradnya/TTU/Fall 2016/Multivariate Analysis/Mid Term/Data/test.csv/train2.csv")
+
+write.csv(test2, file="D:/Pradnya/TTU/Fall 2016/Multivariate Analysis/Mid Term/Data/test.csv/test2.csv")
+
+train.hex = h2o.uploadFile(path="D:/Pradnya/TTU/Fall 2016/Multivariate Analysis/Mid Term/Data/test.csv/train2.csv")
+
+test.hex = h2o.uploadFile(path="D:/Pradnya/TTU/Fall 2016/Multivariate Analysis/Mid Term/Data/test.csv/test2.csv")
+
+summary(test.hex)
+
+train.hex <- as.factor(train.hex)
+
+mydeep = h2o.deeplearning(x= c(2:193),
+                          y=1,
+                          distribution = "multinomial",
+                          activation = "RectifierWithDropout",
+                          overwrite_with_best_model = T,
+                          training_frame= train.hex,
+                          nfolds=5,
+                          use_all_factor_levels = F,
+                          #activation = "TanhWithDropout",
+                          hidden = c(10),
+                          epochs = 100,
+                          train_samples_per_iteration = -1,
+                          seed=1234,
+                          adaptive_rate = TRUE,
+                          rho = 0.1,
+                          rate=0.05,
+                          epsilon = 0.00001,
+                          nesterov_accelerated_gradient = TRUE
+                          )
+
+summary(mydeep)
+mypredict=predict(mydeep,test.hex)
+write.csv(as.data.frame(mypredict),file ="D:/Pradnya/TTU/Fall 2016/Multivariate Analysis/Mid Term/Data/deeplearning.csv")
+
+```
+
+deepnet
+```{r}
+h2o.init()
+
+h2o.init()
+
+train <- read.csv("D:/Pradnya/TTU/Fall 2016/Multivariate Analysis/Mid Term/Data/train.csv/train.csv")
+test <- read.csv("D:/Pradnya/TTU/Fall 2016/Multivariate Analysis/Mid Term/Data/test.csv/test.csv")
+
+train2 = train[,c(-1)]
+test2 = test[,-1]
+
+train2[,1] = as.factor(train2[,1])
+#test2[,y] <- NA
+#test2[,y] = as.factor(test2[,y])
+
+tail(test2)
+
+y <-"species"
+x <- setdiff(names(train2), y)
+x
+
+write.csv(train2, file="D:/Pradnya/TTU/Fall 2016/Multivariate Analysis/Mid Term/Data/test.csv/train2.csv")
+
+write.csv(test2, file="D:/Pradnya/TTU/Fall 2016/Multivariate Analysis/Mid Term/Data/test.csv/test2.csv")
+
+train.hex = h2o.uploadFile(path="D:/Pradnya/TTU/Fall 2016/Multivariate Analysis/Mid Term/Data/test.csv/train2.csv")
+
+test.hex = h2o.uploadFile(path="D:/Pradnya/TTU/Fall 2016/Multivariate Analysis/Mid Term/Data/test.csv/test2.csv")
+
+model <- h2o.deeplearning(x = x,
+ y = y,
+ training_frame = train.hex,
+ nfolds=5,
+ #validation_frame = test.hex,
+ distribution = "multinomial",
+ activation = "RectifierWithDropout",
+ overwrite_with_best_model = T,
+ hidden = c(10),
+ input_dropout_ratio = 0.2,
+ l1 = 1e-5,
+ epochs = 10,
+ train_samples_per_iteration = -1,
+  seed=1234,
+  adaptive_rate = TRUE,
+  rho = 0.1,
+  #rate=0.05,
+ epsilon = 0.00001,
+ nesterov_accelerated_gradient = TRUE
+   )
+
+pred <- h2o.predict(model, newdata = test.hex)
+
+output <-as.data.frame(pred[,-1])
+output <- cbind(test$id,output)
+
+write.csv(as.data.frame(pred),file ="D:/Pradnya/TTU/Fall 2016/Multivariate Analysis/Mid Term/Data/H2O.csv")
+```
